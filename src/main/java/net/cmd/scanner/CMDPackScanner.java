@@ -1,162 +1,351 @@
-package net.cmd.resourcepack;
+package net.cmd.scanner;
 
 import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
-import net.cmd.config.CMDConfigManager;
-import net.cmd.config.CMDMainConfig;
-import net.cmd.util.ZipUtils;
+import net.cmd.compat.CMDModelCase;
+import net.cmd.compat.CMDResolvedModelCase;
+import net.cmd.compat.ModelDefinitionTranslator;
+import net.cmd.config.CMDBlacklist;
+import net.cmd.config.CMDSettings;
+import net.cmd.core.CMDEnvironment;
 
 import java.io.File;
+import java.io.FileReader;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Enumeration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 /**
- * Builds CMD's generated resource-pack archive.
+ * Scans configured source archives/directories for:
+ * - pack.mcmeta
+ * - assets/minecraft/items/*.json
+ * - assets/<namespace>/models/.../*.json
  *
- * Current responsibilities:
- * - write pack.mcmeta
- * - write merged item-definition files
- * - write generated language file
- * - write SOURCES.txt
- * - zip the output directory into a single archive
- *
- * Full asset copying/rewriting is still a later stage goal.
+ * The scanner's job is to read real pack data conservatively and pass that data
+ * into the translator, rather than inventing behavior from loose strings alone.
  */
-public class CMDResourcePackBuilder {
+public class CMDPackScanner {
 
-    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
+    private static final Gson GSON = new Gson();
 
-    /**
-     * Output summary returned after a pack build.
-     */
-    public static class BuildOutput {
-        public File generatedPack;
-        public File sourcesFile;
-        public File buildDirectory;
+    private final CMDSettings settings;
+    private final CMDBlacklist blacklist;
+
+    public CMDPackScanner(CMDSettings settings, CMDBlacklist blacklist) {
+        this.settings = settings;
+        this.blacklist = blacklist;
     }
 
-    /**
-     * Builds the generated CMD resource pack from:
-     * - merged item definitions
-     * - generated language entries
-     * - source archive ids for documentation
-     */
-    public BuildOutput build(
-            Map<String, JsonObject> mergedDefinitions,
-            Map<String, String> generatedLang,
-            List<String> sourceIds
-    ) {
-        BuildOutput out = new BuildOutput();
+    public CMDScanResult scan() {
+        CMDScanResult result = new CMDScanResult();
+        List<File> sources = discoverSources(result);
+        Map<String, ModelDefinitionTranslator.CMDPackModelFile> modelIndex = new LinkedHashMap<>();
 
-        try {
-            File buildDir = PackStructureBuilder.prepareFreshBuildDirectory();
-            out.buildDirectory = buildDir;
+        for (File source : sources) {
+            String sourceId = sourceId(source);
+            result.sourceIds.add(sourceId);
 
-            writePackMcmeta(buildDir);
-            writeMergedItemDefinitions(buildDir, mergedDefinitions);
-            writeGeneratedLang(buildDir, generatedLang);
-
-            File sourcesFile = writeSourcesFile(buildDir, sourceIds, mergedDefinitions);
-            out.sourcesFile = sourcesFile;
-
-            File zipFile = new File(buildDir.getParentFile(), "resources.zip");
-            if (zipFile.exists()) {
-                zipFile.delete();
+            if (source.isDirectory()) {
+                scanDirectorySource(source, sourceId, result, modelIndex);
+            } else if (source.isFile() && (source.getName().toLowerCase().endsWith(".zip") || source.getName().toLowerCase().endsWith(".jar"))) {
+                scanZipSource(source, sourceId, result, modelIndex);
             }
+        }
 
-            ZipUtils.zipDirectory(buildDir, zipFile);
-            out.generatedPack = zipFile;
-        } catch (Exception e) {
-            // BuildOutput remains partially filled for diagnostics.
+        return result;
+    }
+
+    private List<File> discoverSources(CMDScanResult result) {
+        List<File> out = new ArrayList<>();
+
+        if (settings.includeWorldResourcesZip) {
+            File worldResources = new File(CMDEnvironment.getWorldFolder(), "resources.zip");
+            if (worldResources.exists() && worldResources.isFile()) {
+                out.add(worldResources);
+                result.archivesFound++;
+            }
+        }
+
+        if (settings.scanModsFolder) {
+            File modsFolder = CMDEnvironment.getModsFolder();
+            File[] modFiles = modsFolder.listFiles((dir, name) -> name.toLowerCase().endsWith(".jar"));
+            if (modFiles != null) {
+                for (File file : modFiles) {
+                    if (!blacklist.blocks(file.getName())) {
+                        out.add(file);
+                        result.archivesFound++;
+                    }
+                }
+            }
+        }
+
+        for (String relativeSource : settings.scanSources) {
+            File root = CMDEnvironment.resolveFromServerRoot(relativeSource);
+            if (!root.exists()) continue;
+
+            if (root.isDirectory()) {
+                File[] zipFiles = root.listFiles((dir, name) ->
+                        name.toLowerCase().endsWith(".zip") || name.toLowerCase().endsWith(".jar"));
+                if (zipFiles != null) {
+                    for (File file : zipFiles) {
+                        if (!blacklist.blocks(file.getName())) {
+                            out.add(file);
+                            result.archivesFound++;
+                        }
+                    }
+                }
+            } else if (root.isFile() && (root.getName().toLowerCase().endsWith(".zip") || root.getName().toLowerCase().endsWith(".jar"))) {
+                if (!blacklist.blocks(root.getName())) {
+                    out.add(root);
+                    result.archivesFound++;
+                }
+            }
         }
 
         return out;
     }
 
-    /**
-     * Writes the generated pack.mcmeta according to current documented project
-     * direction.
-     *
-     * Current compatibility target:
-     * - min = 55
-     * - max = 75.0
-     */
-    private void writePackMcmeta(File buildDir) throws Exception {
-        CMDMainConfig config = CMDConfigManager.getConfig();
-
-        JsonObject root = new JsonObject();
-        JsonObject pack = new JsonObject();
-
-        JsonObject description = new JsonObject();
-        description.addProperty("text", config.build.generatedPackDescription);
-
-        pack.add("description", description);
-        pack.addProperty("min_format", config.build.generatedPackMinValue);
-        pack.addProperty("max_format", config.build.generatedPackMaxValue);
-
-        root.add("pack", pack);
-
-        File packMcmeta = new File(buildDir, "pack.mcmeta");
-        java.nio.file.Files.writeString(packMcmeta.toPath(), GSON.toJson(root), StandardCharsets.UTF_8);
+    private void scanDirectorySource(
+            File root,
+            String sourceId,
+            CMDScanResult result,
+            Map<String, ModelDefinitionTranslator.CMDPackModelFile> modelIndex
+    ) {
+        scanDirectoryModels(root, sourceId, result, modelIndex);
+        scanDirectoryItemDefinitions(root, sourceId, result, modelIndex);
+        readDirectoryPackMetadata(root, sourceId, result);
     }
 
-    /**
-     * Writes one merged item-definition file per base item under:
-     * - assets/minecraft/items/<item>.json
-     */
-    private void writeMergedItemDefinitions(File buildDir, Map<String, JsonObject> mergedDefinitions) throws Exception {
-        File itemsDir = new File(buildDir, "assets/minecraft/items");
-        itemsDir.mkdirs();
-
-        for (Map.Entry<String, JsonObject> entry : mergedDefinitions.entrySet()) {
-            File outFile = new File(itemsDir, entry.getKey() + ".json");
-            java.nio.file.Files.writeString(outFile.toPath(), GSON.toJson(entry.getValue()), StandardCharsets.UTF_8);
+    private void scanZipSource(
+            File zipFile,
+            String sourceId,
+            CMDScanResult result,
+            Map<String, ModelDefinitionTranslator.CMDPackModelFile> modelIndex
+    ) {
+        try (ZipFile zip = new ZipFile(zipFile, StandardCharsets.UTF_8)) {
+            scanZipModels(zip, sourceId, result, modelIndex);
+            scanZipItemDefinitions(zip, sourceId, result, modelIndex);
+            readZipPackMetadata(zip, sourceId, result);
+        } catch (Exception ignored) {
         }
     }
 
-    /**
-     * Writes generated language entries to:
-     * - assets/cmd/lang/en_us.json
-     *
-     * Current language generation is intentionally simple and deterministic.
-     */
-    private void writeGeneratedLang(File buildDir, Map<String, String> generatedLang) throws Exception {
-        File langDir = new File(buildDir, "assets/cmd/lang");
-        langDir.mkdirs();
+    private void readDirectoryPackMetadata(File root, String sourceId, CMDScanResult result) {
+        File packMcmeta = new File(root, "pack.mcmeta");
+        if (!packMcmeta.exists()) {
+            return;
+        }
 
-        Map<String, String> ordered = new LinkedHashMap<>(generatedLang);
-        File outFile = new File(langDir, "en_us.json");
-        java.nio.file.Files.writeString(outFile.toPath(), GSON.toJson(ordered), StandardCharsets.UTF_8);
+        try (FileReader reader = new FileReader(packMcmeta, StandardCharsets.UTF_8)) {
+            JsonObject json = GSON.fromJson(reader, JsonObject.class);
+            String display = CMDScanResult.extractSourceDisplayName(json);
+            if (display != null) {
+                result.sourceDisplayNames.put(sourceId, display);
+            }
+        } catch (Exception ignored) {
+        }
     }
 
-    /**
-     * Writes SOURCES.txt with a readable list of loaded source archives and the
-     * merged definition outputs currently present.
-     */
-    private File writeSourcesFile(File buildDir, List<String> sourceIds, Map<String, JsonObject> mergedDefinitions) throws Exception {
-        File outFile = new File(buildDir, "SOURCES.txt");
+    private void readZipPackMetadata(ZipFile zip, String sourceId, CMDScanResult result) {
+        try {
+            ZipEntry entry = zip.getEntry("pack.mcmeta");
+            if (entry == null) return;
 
-        StringBuilder sb = new StringBuilder();
-        sb.append("CMD merged sources\n");
-        sb.append("Sources:\n");
+            try (InputStreamReader reader = new InputStreamReader(zip.getInputStream(entry), StandardCharsets.UTF_8)) {
+                JsonObject json = GSON.fromJson(reader, JsonObject.class);
+                String display = CMDScanResult.extractSourceDisplayName(json);
+                if (display != null) {
+                    result.sourceDisplayNames.put(sourceId, display);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+    }
 
-        for (String sourceId : sourceIds) {
-            sb.append("- ").append(sourceId).append("\n");
+    private void scanDirectoryModels(
+            File root,
+            String sourceId,
+            CMDScanResult result,
+            Map<String, ModelDefinitionTranslator.CMDPackModelFile> modelIndex
+    ) {
+        File assetsRoot = new File(root, "assets");
+        if (!assetsRoot.exists()) return;
+
+        File[] namespaces = assetsRoot.listFiles(File::isDirectory);
+        if (namespaces == null) return;
+
+        for (File namespaceDir : namespaces) {
+            File modelsRoot = new File(namespaceDir, "models");
+            if (!modelsRoot.exists()) continue;
+            scanDirectoryModelTree(namespaceDir.getName(), modelsRoot, modelsRoot, sourceId, result, modelIndex);
+        }
+    }
+
+    private void scanDirectoryModelTree(
+            String namespace,
+            File modelsRoot,
+            File current,
+            String sourceId,
+            CMDScanResult result,
+            Map<String, ModelDefinitionTranslator.CMDPackModelFile> modelIndex
+    ) {
+        File[] children = current.listFiles();
+        if (children == null) return;
+
+        for (File file : children) {
+            if (file.isDirectory()) {
+                scanDirectoryModelTree(namespace, modelsRoot, file, sourceId, result, modelIndex);
+                continue;
+            }
+
+            if (!file.getName().toLowerCase().endsWith(".json")) continue;
+
+            String rel = modelsRoot.toPath().relativize(file.toPath()).toString().replace("\\", "/");
+            String path = rel.substring(0, rel.length() - 5);
+
+            countModelPath(rel, result);
+
+            ModelDefinitionTranslator.CMDPackModelFile model = new ModelDefinitionTranslator.CMDPackModelFile(
+                    namespace,
+                    path,
+                    "assets/" + namespace + "/models/" + rel,
+                    sourceId
+            );
+            modelIndex.putIfAbsent(model.fullId(), model);
+        }
+    }
+
+    private void scanZipModels(
+            ZipFile zip,
+            String sourceId,
+            CMDScanResult result,
+            Map<String, ModelDefinitionTranslator.CMDPackModelFile> modelIndex
+    ) {
+        Enumeration<? extends ZipEntry> entries = zip.entries();
+
+        while (entries.hasMoreElements()) {
+            ZipEntry entry = entries.nextElement();
+            String path = entry.getName().replace("\\", "/");
+
+            if (!path.startsWith("assets/")) continue;
+            if (!path.contains("/models/")) continue;
+            if (!path.toLowerCase().endsWith(".json")) continue;
+
+            String[] split = path.split("/", 4);
+            if (split.length < 4) continue;
+
+            String namespace = split[1];
+            String afterNamespace = split[3];
+            if (!afterNamespace.startsWith("models/")) continue;
+
+            String rel = afterNamespace.substring("models/".length());
+            String modelPath = rel.substring(0, rel.length() - 5);
+
+            countModelPath(rel, result);
+
+            ModelDefinitionTranslator.CMDPackModelFile model = new ModelDefinitionTranslator.CMDPackModelFile(
+                    namespace,
+                    modelPath,
+                    path,
+                    sourceId
+            );
+            modelIndex.putIfAbsent(model.fullId(), model);
+        }
+    }
+
+    private void countModelPath(String rel, CMDScanResult result) {
+        String normalized = rel.toLowerCase();
+        result.totalModelJsonCount++;
+
+        if (normalized.startsWith("item/")) {
+            result.itemModelJsonCount++;
+        }
+        if (normalized.startsWith("equipment/")) {
+            result.equipmentModelJsonCount++;
+        }
+        if (normalized.startsWith("humanoid/") || normalized.startsWith("humanoid_leggings/")) {
+            result.humanoidModelJsonCount++;
+        }
+    }
+
+    private void scanDirectoryItemDefinitions(
+            File root,
+            String sourceId,
+            CMDScanResult result,
+            Map<String, ModelDefinitionTranslator.CMDPackModelFile> modelIndex
+    ) {
+        File itemsRoot = new File(root, "assets/minecraft/items");
+        if (!itemsRoot.exists()) return;
+
+        for (String itemId : settings.definitionTargets) {
+            File definition = new File(itemsRoot, itemId + ".json");
+            if (!definition.exists()) continue;
+
+            try (FileReader reader = new FileReader(definition, StandardCharsets.UTF_8)) {
+                JsonObject json = GSON.fromJson(reader, JsonObject.class);
+
+                List<CMDResolvedModelCase> resolved = ModelDefinitionTranslator.translateResolved(
+                        json,
+                        itemId,
+                        "assets/minecraft/items/" + itemId + ".json",
+                        sourceId,
+                        modelIndex
+                );
+                result.resolvedRegistry.computeIfAbsent(itemId, k -> new ArrayList<>()).addAll(resolved);
+
+                List<CMDModelCase> legacy = ModelDefinitionTranslator.translate(json, itemId);
+                result.legacyRegistry.computeIfAbsent(itemId, k -> new ArrayList<>()).addAll(legacy);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private void scanZipItemDefinitions(
+            ZipFile zip,
+            String sourceId,
+            CMDScanResult result,
+            Map<String, ModelDefinitionTranslator.CMDPackModelFile> modelIndex
+    ) {
+        for (String itemId : settings.definitionTargets) {
+            String path = "assets/minecraft/items/" + itemId + ".json";
+            ZipEntry entry = zip.getEntry(path);
+            if (entry == null) continue;
+
+            try (InputStreamReader reader = new InputStreamReader(zip.getInputStream(entry), StandardCharsets.UTF_8)) {
+                JsonObject json = GSON.fromJson(reader, JsonObject.class);
+
+                List<CMDResolvedModelCase> resolved = ModelDefinitionTranslator.translateResolved(
+                        json,
+                        itemId,
+                        path,
+                        sourceId,
+                        modelIndex
+                );
+                result.resolvedRegistry.computeIfAbsent(itemId, k -> new ArrayList<>()).addAll(resolved);
+
+                List<CMDModelCase> legacy = ModelDefinitionTranslator.translate(json, itemId);
+                result.legacyRegistry.computeIfAbsent(itemId, k -> new ArrayList<>()).addAll(legacy);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private String sourceId(File file) {
+        if (file.isDirectory()) {
+            return "dir:" + file.getName();
         }
 
-        sb.append("\n");
-        sb.append("Definitions by item:\n");
-
-        for (Map.Entry<String, JsonObject> entry : mergedDefinitions.entrySet()) {
-            sb.append("\n");
-            sb.append(entry.getKey()).append("\n");
-            sb.append("- merged definition written\n");
+        String name = file.getName().toLowerCase();
+        if (name.endsWith(".jar")) {
+            return "mod:" + file.getName();
         }
 
-        java.nio.file.Files.writeString(outFile.toPath(), sb.toString(), StandardCharsets.UTF_8);
-        return outFile;
+        return "archive:" + file.getName();
     }
 }

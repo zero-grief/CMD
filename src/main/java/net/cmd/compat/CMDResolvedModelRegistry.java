@@ -9,13 +9,22 @@ import java.util.Map;
 
 /**
  * Canonical resolved case registry.
+ *
+ * This registry is the richer pack-driven layer that sits alongside the older
+ * legacy CMDModelCase registry while the project transitions toward resolved
+ * model understanding.
  */
 public class CMDResolvedModelRegistry {
 
     private static final Map<String, List<CMDResolvedModelCase>> ITEM_CASES = new HashMap<>();
 
-    public static void clear() { ITEM_CASES.clear(); }
-    public static void addCase(String baseItemId, CMDResolvedModelCase modelCase) { ITEM_CASES.computeIfAbsent(baseItemId, k -> new ArrayList<>()).add(modelCase); }
+    public static void clear() {
+        ITEM_CASES.clear();
+    }
+
+    public static void addCase(String baseItemId, CMDResolvedModelCase modelCase) {
+        ITEM_CASES.computeIfAbsent(baseItemId, k -> new ArrayList<>()).add(modelCase);
+    }
 
     public static void loadFromMap(Map<String, List<CMDResolvedModelCase>> map) {
         clear();
@@ -27,23 +36,35 @@ public class CMDResolvedModelRegistry {
     private static List<CMDResolvedModelCase> normalizeUniqueDisplayIds(List<CMDResolvedModelCase> input) {
         Map<String, Integer> counts = new LinkedHashMap<>();
         List<CMDResolvedModelCase> out = new ArrayList<>();
+
         for (CMDResolvedModelCase source : input) {
             CMDResolvedModelCase copy = copyOf(source);
-            String baseValue = copy.modelValue != null && !copy.modelValue.isBlank() ? copy.modelValue : copy.displayId;
+
+            String baseValue = copy.modelValue != null && !copy.modelValue.isBlank()
+                    ? copy.modelValue
+                    : copy.displayId;
+
             if (baseValue == null || baseValue.isBlank()) {
                 out.add(copy);
                 continue;
             }
+
             int next = counts.getOrDefault(baseValue.toLowerCase(), 0) + 1;
             counts.put(baseValue.toLowerCase(), next);
+
             if (next > 1) {
                 String uniqueValue = baseValue + next;
                 copy.modelValue = uniqueValue;
                 copy.displayId = (copy.modelNamespace != null ? copy.modelNamespace + ":" : "") + uniqueValue;
-                if (copy.suggestedAnvilText != null && !copy.suggestedAnvilText.contains(":")) copy.suggestedAnvilText = uniqueValue;
+
+                if (copy.suggestedAnvilText != null && !copy.suggestedAnvilText.contains(":")) {
+                    copy.suggestedAnvilText = uniqueValue;
+                }
             }
+
             out.add(copy);
         }
+
         return out;
     }
 
@@ -67,20 +88,35 @@ public class CMDResolvedModelRegistry {
         return out;
     }
 
-    public static List<CMDResolvedModelCase> getCases(String baseItemId) { return ITEM_CASES.getOrDefault(baseItemId, List.of()); }
-    public static Map<String, List<CMDResolvedModelCase>> getAll() { return Collections.unmodifiableMap(ITEM_CASES); }
+    public static List<CMDResolvedModelCase> getCases(String baseItemId) {
+        return ITEM_CASES.getOrDefault(baseItemId, List.of());
+    }
+
+    public static Map<String, List<CMDResolvedModelCase>> getAll() {
+        return Collections.unmodifiableMap(ITEM_CASES);
+    }
 
     public static CMDResolvedModelCase findByDisplayId(String baseItemId, String displayId) {
-        for (CMDResolvedModelCase c : getCases(baseItemId)) if (c.displayId != null && c.displayId.equalsIgnoreCase(displayId)) return c;
+        for (CMDResolvedModelCase c : getCases(baseItemId)) {
+            if (c.displayId != null && c.displayId.equalsIgnoreCase(displayId)) {
+                return c;
+            }
+        }
         return null;
     }
 
     public static CMDResolvedModelCase findByAnvilInput(String baseItemId, String input) {
         if (input == null) return null;
+
         for (CMDResolvedModelCase c : getCases(baseItemId)) {
-            if (c.suggestedAnvilText != null && c.suggestedAnvilText.equalsIgnoreCase(input)) return c;
-            if (c.displayId != null && c.displayId.equalsIgnoreCase(input)) return c;
+            if (c.suggestedAnvilText != null && c.suggestedAnvilText.equalsIgnoreCase(input)) {
+                return c;
+            }
+            if (c.displayId != null && c.displayId.equalsIgnoreCase(input)) {
+                return c;
+            }
         }
+
         return null;
     }
 }

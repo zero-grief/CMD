@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "cmd",
+  "version": "${version}",
+  "name": "CMD",
+  "description": "Server-side Fabric mod for Minecraft 1.21.11 that scans modern resourcepack item definitions, builds a resolved model registry, and lets players use custom item models through a vanilla-friendly Name Tag + smithing table workflow with chat browsing, previews, and admin tooling.",
+  "authors": [
+    "ChatGPT",
+    ".rexam",
+    "Just_S"
+  ],
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "net.cmd.core.CMDServer"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.18.4",
+    "minecraft": "1.21.11",
+    "fabric-api": "*"
+  },
+  "icon": "assets/cmd/icon.png"
+}

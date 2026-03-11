@@ -7,11 +7,24 @@ import java.nio.file.Path;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+/**
+ * Zip helpers used by CMD's generated pack output.
+ */
 public class ZipUtils {
+
     public static void zipFolder(File sourceDir, File zipFile) {
         try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zipFile))) {
             zipDirectoryRecursive(sourceDir, sourceDir.toPath(), zos);
-        } catch (Exception e) { e.printStackTrace(); }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * Compatibility bridge for callers that already use zipDirectory(...).
+     */
+    public static void zipDirectory(File sourceDir, File zipFile) {
+        zipFolder(sourceDir, zipFile);
     }
 
     private static void zipDirectoryRecursive(File current, Path rootPath, ZipOutputStream zos) throws Exception {
@@ -26,9 +39,11 @@ public class ZipUtils {
 
             String entryName = rootPath.relativize(file.toPath()).toString().replace("\\", "/");
             zos.putNextEntry(new ZipEntry(entryName));
+
             try (FileInputStream fis = new FileInputStream(file)) {
                 fis.transferTo(zos);
             }
+
             zos.closeEntry();
         }
     }

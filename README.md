@@ -1,4 +1,4 @@
-![CMD banner](./assets/cmd/banner.png)
+![CMD banner](./assets/LogoHeader/banner.png)
 
 # CMD
 
